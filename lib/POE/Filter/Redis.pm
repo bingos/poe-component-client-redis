@@ -155,8 +155,8 @@ sub put {
   foreach my $line ( @{ $cmds } ) {
     next unless ref $line eq 'ARRAY';
     my $cmd = shift @{ $line };
-    push @raw, 
-      join( "\x0D\x0A", 
+    push @raw,
+      join( "\x0D\x0A",
             '*' . ( 1 + @{ $line } ),
             map { ('$' . length $_ => $_) }
               ( uc($cmd), map { $self->{encoding} && length($_)
