@@ -15,10 +15,21 @@ use constant {
   PARSER_IN_BULK      => 0x04,
 };
 
+use constant {
+  SELF_BUFFER   => 0,
+  SELF_ENCODING => 1,
+  SELF_STATE    => 2,
+  SELF_HAS      => 3,
+  SELF_LENGTH   => 4,
+  SELF_AWAITING => 5,
+  SELF_TYPE     => 6,
+};
+
 sub new {
   my $package = shift;
+
   my %args = @_;
-  $args{lc $_} = delete $args{$_} for grep /[[:upper:]]/, keys %args;
+
   if ( my $encoding = $args{encoding}) {
     $args{encoding} = Encode::find_encoding( $encoding );
     unless ( ref $args{encoding} ) {
@@ -26,67 +37,76 @@ sub new {
       delete $args{encoding};
     }
   }
-  @args{qw(BUFFER STATE)} = ('', PARSER_IDLE);
-  return bless \%args, $package;
-}
 
-sub clone {
-  my $self = shift;
-  my $nself = { };
-  $nself->{$_} = $self->{$_} for keys %{ $self };
-  @$nself{qw(BUFFER STATE)} = ('', PARSER_IDLE);
-  return bless $nself, ref $self;
+  return bless [
+    '',              # SELF_BUFFER
+    $args{encoding}, # SELF_ENCODING
+    PARSER_IDLE,     # SELF_STATE
+    [ ],             # SELF_HAS
+    0,               # SELF_LENGTH
+    0,               # SELF_AWAITING
+    undef,           # SELF_TYPE
+  ], $package;
 }
 
 sub get_one_start {
   my ($self, $stream) = @_;
-  $self->{BUFFER} .= join '', @{ $stream };
+  $self->[SELF_BUFFER] .= join '', @{ $stream };
 }
 
 sub get_one {
   my $self = shift;
 
+  return [ ] unless (
+    length $self->[SELF_BUFFER] and $self->[SELF_BUFFER] =~ /\x0D\x0A/
+  );
+
   # I expect it to be here mostly.
-  if ($self->{STATE} & PARSER_IDLE) {
+  if ($self->[SELF_STATE] & PARSER_IDLE) {
 
     # Single-line responses.  Remain in PARSER_IDLE state.
-    return [ [ $1, $2 ] ] if $self->{BUFFER} =~ s/^([-+:])(.*?)\x0D\x0A//s;
+    return [ [ $1, $2 ] ] if $self->[SELF_BUFFER] =~ s/^([-+:])(.*?)\x0D\x0A//s;
 
-    if ($self->{BUFFER} =~ s/^\*(\d+)\x0D\x0A//) {
+    if ($self->[SELF_BUFFER] =~ s/^\*(-?\d+)\x0D\x0A//) {
 
       # Zero-item multibulk is an empty list.
       # Remain in the PARSER_IDLE state.
-      return [ [ '*', [] ] ] if $1 == 0;
+      return [ [ '*', ] ] if $1 == 0;
 
-      @$self{qw(STATE AWAITING HAS TYPE)} = (PARSER_BETWEEN_BULK, $1, [], '*');
+      # Negative item multibulk is an undef list.
+      return [ [ '*', undef ] ] if $1 < 0;
+
+      @$self[SELF_STATE, SELF_AWAITING, SELF_HAS, SELF_TYPE] = (
+        PARSER_BETWEEN_BULK, $1, [], '*'
+      );
     }
-    elsif ($self->{BUFFER} =~ s/^\$(-?\d+)\x0D\x0A//) {
+    elsif ($self->[SELF_BUFFER] =~ s/^\$(-?\d+)\x0D\x0A//) {
 
       # -1 length is undef.
       # Remain in the PARSER_IDLE state.
-      return [ [ '$', undef ] ] if $1 == -1;;
+      return [ [ '$', undef ] ] if $1 < 0;
 
-      @$self{qw(STATE AWAITING LENGTH HAS TYPE)} = (
+      @$self[SELF_STATE, SELF_AWAITING, SELF_LENGTH, SELF_HAS, SELF_TYPE] = (
         PARSER_IN_BULK, 1, $1 + 2, [], '$'
       );
     }
     else {
       # TODO - Recover somehow.
-      die "illgegal redis response:\n$self->{BUFFER}";
+      die "illegal redis response:\n$self->[SELF_BUFFER]";
     }
   }
 
   while (1) {
-    if ($self->{STATE} & PARSER_BETWEEN_BULK) {
+    if ($self->[SELF_STATE] & PARSER_BETWEEN_BULK) {
 
       # Can't parse a bulk header?
-      return [ ] unless $self->{BUFFER} =~ s/^\$(-?\d+)\x0D\x0A//;
+      return [ ] unless $self->[SELF_BUFFER] =~ s/^\$(-?\d+)\x0D\x0A//;
 
       # -1 length is undef.
-      if ($1 == -1) {
-        if (push(@{$self->{HAS}}, undef) == $self->{AWAITING}) {
-          $self->{STATE} = PARSER_IDLE;
-          return [ @$self{qw(TYPE HAS)} ];
+      if ($1 < 0) {
+        if (push(@{$self->[SELF_HAS]}, undef) == $self->[SELF_AWAITING]) {
+          $self->[SELF_STATE] = PARSER_IDLE;
+          return [ [ $self->[SELF_TYPE], @{$self->[SELF_HAS]} ] ];
         }
 
         # Remain in PARSER_BETWEEN_BULK state.
@@ -94,35 +114,35 @@ sub get_one {
       }
 
       # Got a bulk length.
-      @$self{qw( STATE LENGTH )} = (PARSER_IN_BULK, $1 + 2);
+      @$self[SELF_STATE, SELF_LENGTH] = (PARSER_IN_BULK, $1 + 2);
 
       # Fall through.
     }
 
     # TODO - Just for debugging..
-    die "unexpected state $self->{STATE}" unless (
-      $self->{STATE} & PARSER_IN_BULK
+    die "unexpected state $self->[SELF_STATE]" unless (
+      $self->[SELF_STATE] & PARSER_IN_BULK
     );
 
     # Not enough data?
-    return [ ] if length $self->{BUFFER} < $self->{LENGTH};
+    return [ ] if length $self->[SELF_BUFFER] < $self->[SELF_LENGTH];
 
     # Got a bulk value.
     if (
       push(
-        @{$self->{HAS}},
+        @{$self->[SELF_HAS]},
         substr(
-          substr($self->{BUFFER}, 0, $self->{LENGTH}, ''),
-          0, $self->{LENGTH} - 2
+          substr($self->[SELF_BUFFER], 0, $self->[SELF_LENGTH], ''),
+          0, $self->[SELF_LENGTH] - 2
         )
-      ) == $self->{AWAITING}
+      ) == $self->[SELF_AWAITING]
     ) {
-      $self->{STATE} = PARSER_IDLE;
-      return [ @$self{qw(TYPE HAS)} ];
+      $self->[SELF_STATE] = PARSER_IDLE;
+      return [ [ $self->[SELF_TYPE], @{$self->[SELF_HAS]} ] ];
     }
 
     # But... not enough of them.
-    $self->{STATE} = PARSER_BETWEEN_BULK;
+    $self->[SELF_STATE] = PARSER_BETWEEN_BULK;
   }
 
   die "never gonna give you up, never gonna let you down";
