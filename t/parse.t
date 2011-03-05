@@ -25,13 +25,13 @@ my $f = POE::Filter::Redis->new();
 	);
 
 	my @redis_equiv = (
-		[ '+', 'OK'               ], 
-		[ '-', 'NOT OK THIS TIME' ], 
-		[ ':', '12345'            ], 
+		[ '+', 'OK'               ],
+		[ '-', 'NOT OK THIS TIME' ],
+		[ ':', '12345'            ],
 		[ '$', undef              ],
-		[ '$', 'spang'            ], 
+		[ '$', 'spang'            ],
 		[ '*',                    ],
-		[ '$', 'narf'             ], 
+		[ '$', 'narf'             ],
 		[ '*', undef              ],
 	);
 
