@@ -161,7 +161,7 @@ sub put {
             map { ('$' . length $_ => $_) }
               ( uc($cmd), map { $self->{encoding} && length($_)
                                 ? $self->{encoding}->encode($_)
-                                : $_ } @{ $line } ) );
+                                : $_ } @{ $line } ) ) . "\x0D\x0A";
   }
   \@raw;
 }
