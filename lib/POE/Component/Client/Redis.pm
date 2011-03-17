@@ -4,8 +4,8 @@ package POE::Component::Client::Redis;
 
 use strict;
 use warnings;
-use Socket qw[AF_INET SOCK_STREAM];
-use POE qw[Filter::Redis Wheel::SocketFactory Wheel::ReadWrite];
+use POE qw[Filter::Redis];
+use Test::POE::Client::TCP;
 
 sub spawn {
   my $package = shift;
@@ -18,7 +18,9 @@ sub spawn {
   $self->{session_id} = POE::Session->create(
   object_states => [
      $self => { shutdown => '_shutdown', redis_cmd => '_redis_cmd' },
-     $self => [qw(_start _redis_cmd _connect _sock_up _sock_fail _conn_input _conn_error _shutdown)],
+     $self => [qw(_start _redis_cmd _connect _shutdown),
+               map { join('_','_redis',$_) } qw(socket_failed connected disconnected input),
+     ],
   ],
   heap => $self,
   ( ref($options) eq 'HASH' ? ( options => $options ) : () ),
@@ -77,21 +79,18 @@ sub _shutdown {
 
 sub _connect {
   my ($kernel,$self) = @_[KERNEL,OBJECT];
-  $self->{_factory} = POE::Wheel::SocketFactory->new(
-      SocketDomain => AF_INET,
-      SocketType => SOCK_STREAM,
-      SocketProtocol => 'tcp',
-      RemoteAddress => $self->{host},
-      RemotePort => $self->{port},
-      SuccessEvent => '_sock_up',
-      FailureEvent => '_sock_fail',
+  $self->{_redis} = Test::POE::Client::TCP->spawn(
+    address => $self->{host},
+    port    => $self->{port},
+    filter  => POE::Filter::Redis->new(),
+    prefix  => '_redis',
+    autoconnect => 1,
   );
   return;
 }
 
-sub _sock_fail {
+sub _redis_socket_failed {
   my ($kernel,$self) = @_[KERNEL,OBJECT];
-  delete $self->{_factory};
   warn "Couldn\'t establish a connection: ", join(' ', @_[ARG0..ARG2]), "\n";
   $kernel->yield( '_shutdown' );
   return;
